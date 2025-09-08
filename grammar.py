@@ -6,10 +6,10 @@ SEMI: ";"
 STAR: "*"
 
 // ====== Start ======
-start: "SELECT" SP select_list SP "FROM" SP table opt_where opt_group_by opt_order_by opt_limit SEMI
+start: "SELECT" SP select_list SP "FROM" SP table [SP opt_where] [SP opt_group_by] [SP opt_order_by] [SP opt_limit] SEMI
 
-// ====== Table (rename IDENTIFIER to your actual table if you like strictness) ======
-table: IDENTIFIER   // e.g. 'flights_df'
+// ====== Table (lock to flights_df for safety) ======
+table: "flights_df"
 
 // ====== Projections ======
 select_list: select_item (COMMA SP select_item)*
@@ -45,6 +45,7 @@ numeric_field: "DEPARTURE_DELAY"
              | "AIR_TIME"
              | "ELAPSED_TIME"
              | "SCHEDULED_TIME"
+             | "DAY_OF_WEEK"      // allow numeric filtering by weekday (1..7)
 
 // ====== Canonical derived expressions ======
 mph_expr: "(" "DISTANCE" SP "*" SP "60" SP "/" SP "AIR_TIME" ")"
@@ -52,7 +53,7 @@ dep_hour_expr: "intDiv" "(" "SCHEDULED_DEPARTURE" COMMA SP "100" ")"
 arr_hour_expr: "intDiv" "(" "SCHEDULED_ARRIVAL" COMMA SP "100" ")"
 
 // ====== WHERE (only AND, no OR, to keep it robust) ======
-opt_where: | SP "WHERE" SP boolean_conj
+opt_where: "WHERE" SP boolean_conj
 boolean_conj: condition (SP "AND" SP condition)*
 
 condition: comparison
@@ -82,12 +83,12 @@ earlylate_clause: "abs" "(" "ARRIVAL_DELAY" ")" SP "<=" SP number
                 | "DEPARTURE_DELAY" SP ">=" SP number
 
 // ====== GROUP BY ======
-opt_group_by: | SP "GROUP" SP "BY" SP group_cols
+opt_group_by: "GROUP" SP "BY" SP group_cols
 group_cols: group_expr (COMMA SP group_expr)*
 group_expr: column | dep_hour_expr | arr_hour_expr
 
 // ====== ORDER BY ======
-opt_order_by: | SP "ORDER" SP "BY" SP order_cols
+opt_order_by: "ORDER" SP "BY" SP order_cols
 order_cols: order_expr (COMMA SP order_expr)*
 order_expr: (agg_func "(" measure ")" 
             | quantile_fn "(" quant_p ")" "(" measure ")"
@@ -98,7 +99,7 @@ order_expr: (agg_func "(" measure ")"
 order_dir: "ASC" | "DESC"
 
 // ====== LIMIT ======
-opt_limit: | SP "LIMIT" SP NUMBER
+opt_limit: "LIMIT" SP NUMBER
 
 // ====== Terminals ======
 alias: IDENTIFIER
@@ -116,11 +117,15 @@ sql_lark_cfg_tool = {
     "type": "custom",
     "name": "clickhouse_sql_grammar",
     "description": (
-        "Produces read-only ClickHouse SQL over the flights_df table. "
-        "Allowed: SELECT, FROM, WHERE (AND only), GROUP BY, ORDER BY, LIMIT; "
-        "Derived: intDiv(SCHEDULED_DEPARTURE,100), intDiv(SCHEDULED_ARRIVAL,100), (DISTANCE*60/AIR_TIME); "
+        "Read-only ClickHouse SQL over table flights_df. "
+        "Allowed: SELECT, FROM, WHERE (AND only), GROUP BY, ORDER BY, LIMIT. "
+        "Columns: AIRLINE, ORIGIN_AIRPORT, DESTINATION_AIRPORT, FLIGHT_DATE, DAY_OF_WEEK, "
+        "DEPARTURE_DELAY, ARRIVAL_DELAY, DISTANCE, AIR_TIME, ELAPSED_TIME, SCHEDULED_TIME, "
+        "SCHEDULED_DEPARTURE, SCHEDULED_ARRIVAL (the latter two are used via intDiv for hour). "
+        "Units: delays/times are minutes; distances are miles; SCHEDULED_* are HHMM integers; DAY_OF_WEEK is 1..7. "
+        "Derived: intDiv(SCHEDULED_DEPARTURE,100), intDiv(SCHEDULED_ARRIVAL,100), (DISTANCE*60/AIR_TIME). "
         "Aggregates: avg,sum,min,max,count,countIf(cond),quantileTDigest/Exact(p)(field). "
-        "Adhere strictly to the grammar."
+        "Adhere strictly to the grammar; no joins, subqueries, or DML."
     ),
     "format": {
         "type": "grammar",

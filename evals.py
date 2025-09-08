@@ -53,6 +53,9 @@ ALLOWED_COLS: Set[str] = {
     "AIR_TIME",
     "ELAPSED_TIME",
     "SCHEDULED_TIME",
+    # used inside derived expressions
+    "SCHEDULED_DEPARTURE",
+    "SCHEDULED_ARRIVAL",
 }
 
 ALLOWED_FUNCS: Set[str] = {
@@ -128,4 +131,3 @@ def policy_check(sql: str) -> Tuple[bool, List[str]]:
         problems.append("Subqueries are not allowed.")
 
     return (len(problems) == 0), problems
-

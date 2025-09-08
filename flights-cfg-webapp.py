@@ -46,8 +46,17 @@ async def generate_sql_from_nl(
     """Use Azure OpenAI with a grammar tool to produce a safe SQL string and optional model text."""
 
     prompt = (
-        "You translate natural language into valid ClickHouse SQL over table flights_df. "
-        "Use only constructs allowed by the provided grammar. Always end with a semicolon. "
+        "You translate natural language into valid ClickHouse SQL over table flights_df.\n"
+        "Constraints (must follow): SELECT-only; FROM flights_df; WHERE supports AND only; GROUP BY; ORDER BY; LIMIT.\n"
+        "Columns available: AIRLINE, ORIGIN_AIRPORT, DESTINATION_AIRPORT, FLIGHT_DATE, DAY_OF_WEEK, "
+        "DEPARTURE_DELAY, ARRIVAL_DELAY, DISTANCE, AIR_TIME, ELAPSED_TIME, SCHEDULED_TIME; "
+        "SCHEDULED_DEPARTURE and SCHEDULED_ARRIVAL are HHMM integers used via intDiv(*,100) to get the hour.\n"
+        "Units: delays/times are minutes; distances are miles; DAY_OF_WEEK is 1..7.\n"
+        "Derived expressions permitted: intDiv(SCHEDULED_DEPARTURE,100), intDiv(SCHEDULED_ARRIVAL,100), (DISTANCE*60/AIR_TIME).\n"
+        "Aggregates permitted: avg,sum,min,max,count,countIf(cond),quantileTDigest/Exact(p)(field).\n"
+        "If filtering by hour, use the intDiv-derived expressions or the provided BETWEEN hour clauses.\n"
+        "Use only constructs allowed by the provided grammar. End every statement with a semicolon.\n"
+        "Only return a valid SQL statement during the first turn of the conversation, and nothing else.\n"
         "User request: " + natural_language_query
     )
 
@@ -105,7 +114,7 @@ def render_df_table(df: pd.DataFrame) -> Any:
     """Render a pandas DataFrame as HTML inside an FT Div without escaping."""
     head_df = df.head(200)
     table_html = head_df.to_html(index=False, border=0)
-    return Div(NotStr(table_html))
+    return Div(NotStr(table_html), cls="table-scroll")
 
 
 # ----- LLM follow-up with ClickHouse result -----
@@ -200,13 +209,23 @@ _app_css = Style(
     .query-grid textarea { width: 100%; height: 52px; min-height: 52px; max-height: 52px; resize: none; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); color: inherit; padding: .9rem 1rem; }
     .query-grid textarea::placeholder { opacity: .6; }
     .results-grid { display:grid; grid-template-columns: 1fr; gap: 1.25rem; align-items:start; margin-top: 1rem; }
-    @media (min-width: 1100px) { .results-grid { grid-template-columns: 1.15fr .85fr; } }
-    .sql-card { min-height: 240px; max-height: 380px; overflow: auto; border-radius: 10px; background: var(--surface); border: 1px solid var(--border); }
-    .sql-card pre { margin: 0 !important; }
-    /* Table polish */
-    #results table { width: 100%; border-collapse: collapse; }
+    .results-grid > * { width: 100%; }
+    @media (min-width: 1100px) { .results-grid { grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr); } }
+    .left-stack { display:grid; gap: 1rem; width: 100%; }
+    .panel { box-sizing: border-box; width: 100%; }
+    /* SQL viewer */
+    .sql-wrap { position: relative; }
+    .sql-actions { position: absolute; top: .4rem; right: .5rem; display:flex; gap:.5rem; z-index: 2; }
+    .sql-view { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+                font-size: .9rem; line-height: 1.35; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
+                background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: .8rem .95rem;
+                max-height: 380px; overflow: auto; margin: 0; }
+    /* Table polish + scroll */
+    .table-scroll { width: 100%; overflow: auto; max-height: 420px; }
+    #results table { min-width: 100%; width: max-content; border-collapse: separate; border-spacing: 0; white-space: nowrap; }
     #results thead th { position: sticky; top: 0; background: var(--surface-2); z-index: 1; }
-    #results th, #results td { padding: .5rem .75rem; border-bottom: 1px solid var(--border); font-size: .92rem; }
+    #results th, #results td { padding: .5rem .75rem; border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); font-size: .92rem; }
+    #results th:first-child, #results td:first-child { border-left: 1px solid var(--border); }
     #results tr:hover td { background: rgba(255,255,255,.02); }
     .tight { margin-block: .5rem; }
     /* Placeholder phases inside results */
@@ -270,15 +289,25 @@ def mk_form() -> Any:
 @rt
 def index(req):
     hero = Div(
-        P("Ask a question about flights. We'll convert it to SQL and run it in ClickHouse.", cls="muted"),
+        P(
+            "Ask a question about flights. We'll convert it to SQL and run it in ClickHouse.",
+            cls="muted",
+        ),
         cls="hero",
     )
 
     res_placeholder = Div(
         H3("Results"),
-        Div("Enter a natural language request above and click Run to see results.", cls="placeholder placeholder-idle muted"),
-        Div(Span("Loading results", cls="dots"), cls="placeholder placeholder-loading muted"),
-        id="results", cls="panel"
+        Div(
+            "Enter a natural language request above and click Run to see results.",
+            cls="placeholder placeholder-idle muted",
+        ),
+        Div(
+            Span("Loading results", cls="dots"),
+            cls="placeholder placeholder-loading muted",
+        ),
+        id="results",
+        cls="panel",
     )
 
     body = Div(hero, mk_form(), res_placeholder, cls="space-y-3")
@@ -341,27 +370,30 @@ async def run(nl_query: str = "", sess=None):
         )
 
         # Build polished two-column UI
-        sql_block = CodeBlock(sql_query, language="sql")
+        sql_pre = Pre(Code(sql_query), id="sql_text", cls="sql-view")
         llm_notes = llm_text if llm_text else None
 
         results_pane = Div(
             H3("Results"),
-            render_df_table(df) if not df.empty else P("No rows returned.", cls="muted"),
-            cls="panel"
+            (
+                render_df_table(df)
+                if not df.empty
+                else P("No rows returned.", cls="muted")
+            ),
+            cls="panel",
         )
 
         left_pane_children = []
         if llm_followup_text:
-            left_pane_children.append(Div(H3("Model on Results"), P(llm_followup_text), cls="panel"))
+            left_pane_children.append(
+                Div(H3("Model on Results"), P(llm_followup_text), cls="panel")
+            )
         if llm_notes:
             left_pane_children.append(Div(H3("Model Notes"), P(llm_notes), cls="panel"))
-        left_pane_children.append(Div(H3("Generated SQL"), Div(sql_block, cls="sql-card"), cls="panel"))
+        # Generated SQL panel (no copy buttons)
+        left_pane_children.append(Div(H3("Generated SQL"), sql_pre, cls="panel sql-wrap"))
 
-        grid = Div(
-            Div(*left_pane_children),
-            results_pane,
-            cls="results-grid"
-        )
+        grid = Div(Div(*left_pane_children, cls="left-stack"), results_pane, cls="results-grid")
         # ---------- Evals on the generated SQL ----------
         eval_tiles = []
         # 1) Grammar acceptance
@@ -370,10 +402,17 @@ async def run(nl_query: str = "", sess=None):
             Div(
                 Div(
                     H3("Grammar Acceptance"),
-                    Span("?", title="Checks the SQL against the custom Lark grammar (CFG).", cls="eval-help"),
+                    Span(
+                        "?",
+                        title="Checks the SQL against the custom Lark grammar (CFG).",
+                        cls="eval-help",
+                    ),
                 ),
                 P("Does the SQL conform to the flights CFG?", cls="muted"),
-                P("Pass" if g_ok else f"Fail: {g_msg}", cls="status-pass" if g_ok else "status-fail"),
+                P(
+                    "Pass" if g_ok else f"Fail: {g_msg}",
+                    cls="status-pass" if g_ok else "status-fail",
+                ),
                 cls="panel eval-tile",
             )
         )
@@ -384,10 +423,17 @@ async def run(nl_query: str = "", sess=None):
             Div(
                 Div(
                     H3("ClickHouse Parse"),
-                    Span("?", title="Parses with sqlglot using the ClickHouse dialect.", cls="eval-help"),
+                    Span(
+                        "?",
+                        title="Parses with sqlglot using the ClickHouse dialect.",
+                        cls="eval-help",
+                    ),
                 ),
                 P("Is it valid ClickHouse SQL?", cls="muted"),
-                P("Pass" if s_ok else f"Fail: {s_msg}", cls="status-pass" if s_ok else "status-fail"),
+                P(
+                    "Pass" if s_ok else f"Fail: {s_msg}",
+                    cls="status-pass" if s_ok else "status-fail",
+                ),
                 cls="panel eval-tile",
             )
         )
@@ -400,18 +446,23 @@ async def run(nl_query: str = "", sess=None):
             Div(
                 Div(
                     H3("Policy & Safeguards"),
-                    Span("?", title="Enforces read-only and whitelists. Forbids joins, unions, DDL, etc.", cls="eval-help"),
+                    Span(
+                        "?",
+                        title="Enforces read-only and whitelists. Forbids joins, unions, DDL, etc.",
+                        cls="eval-help",
+                    ),
                 ),
                 P(p_desc, cls="muted"),
-                P("Pass" if p_ok else f"Fail: {p_detail}", cls="status-pass" if p_ok else "status-fail"),
+                P(
+                    "Pass" if p_ok else f"Fail: {p_detail}",
+                    cls="status-pass" if p_ok else "status-fail",
+                ),
                 cls="panel eval-tile",
             )
         )
 
         evals_section = Div(
-            H3("SQL Evals"),
-            Div(*eval_tiles, cls="eval-grid"),
-            cls="evals-section"
+            H3("SQL Evals"), Div(*eval_tiles, cls="eval-grid"), cls="evals-section"
         )
 
         return result_card(Div(grid, evals_section))
