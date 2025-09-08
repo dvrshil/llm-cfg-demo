@@ -53,7 +53,6 @@ ALLOWED_COLS: Set[str] = {
     "AIR_TIME",
     "ELAPSED_TIME",
     "SCHEDULED_TIME",
-    # used inside derived expressions
     "SCHEDULED_DEPARTURE",
     "SCHEDULED_ARRIVAL",
 }
@@ -71,6 +70,7 @@ ALLOWED_FUNCS: Set[str] = {
     # scalar/derived
     "INTDIV",
     "ABS",
+    "*",
 }
 
 FORBIDDEN_NODES = (
@@ -131,3 +131,77 @@ def policy_check(sql: str) -> Tuple[bool, List[str]]:
         problems.append("Subqueries are not allowed.")
 
     return (len(problems) == 0), problems
+
+
+# ---------- Example NL queries for evals and demos ----------
+# These prompts exercise different dimensions of the dataset while
+# staying within the app's grammar: SELECT-only, GROUP BY/ORDER BY,
+# hour filters via scheduled dep/arr hours, and 15-minute delay thresholds.
+EVAL_NL_QUERIES: List[str] = [
+    # Airline‑level summaries
+    "Which airlines had the worst delays when flights arrived in January 2015? Show me the top ten.",
+    "Tell me about airlines with the worst departure delays and how many of their flights were really late (15+ minutes).",
+    "Which airlines flew the most miles across 2015?",
+    "Which airlines were best at getting flights to arrive on time in Q2 2015?",
+    # Airport‑level summaries
+    "Which airports are worst for departure delays when flights leave from there?",
+    "Which airports see the most really late arrivals (15+ minutes)?",
+    "Which airports had the best departure delays in July 2015?",
+    # Route breakdowns (origin → destination)
+    "What are the worst routes for arrival delays? Show me flights from one airport to another.",
+    "How far do different routes go and how long do they take in the air? Show me the longest routes.",
+    # Day‑of‑week patterns
+    "How bad are departure delays on different days of the week?",
+    "How many flights arrived really late (15+ minutes) on each day of the week?",
+    # Hour‑of‑day windows
+    "During morning rush hour (6-10am), which airlines have the worst departure delays?",
+    "During evening rush (5-8pm), which airports have the most really late departures (15+ minutes)?",
+    # Date ranges
+    "How did airlines do with arrival delays during June 2015?",
+    "Which airports had flights covering the most distance in the last 12 days of December 2015?",
+    # Month‑specific comparisons
+    "How did airlines perform with departure delays in March 2015 — who was best and worst?",
+    "Which airports had the most really late arrivals (15+ minutes) in November 2015?",
+    # Mix of aggregates
+    "For each airline, show me their typical, best, and worst arrival delays. Order by typical delay.",
+    "For each airport, show me their typical, best, and worst departure delays. Order by typical delay.",
+    # Speed proxy (mph)
+    "Which airlines had the fastest flights on average?",
+    "How fast were flights from different airports in June 2015?",
+    # Peak times exploration
+    "How bad are arrival delays in the evening when flights are scheduled to land between 6-11pm?",
+    "How many flights arrived really late (15+ minutes) in the morning rush (7-9am) for each hour?",
+    # Specific carriers or airports
+    "For Southwest (WN), how do departure delays vary by day of the week?",
+    "From San Francisco (SFO), which destinations have the worst arrival delays?",
+    "To JFK airport, which origin airports send flights covering the most distance?",
+    # Holiday windows
+    "How did airlines do with departure delays around Thanksgiving week (Nov 20-30, 2015)?",
+    "Which airports had the most really late arrivals (15+ minutes) during Christmas week (Dec 20-27, 2015)?",
+    # Morning vs evening
+    "How do airlines perform with departure delays in the morning (6-9am)?",
+    "How do airlines perform with departure delays in the evening (5-8pm)?",
+    # Route leaders
+    "Which airports have flights that cover the most total distance when departing from there?",
+    "Which airports receive flights that cover the most total distance when arriving there?",
+    # Delay distributions via percentiles
+    "For each airline, what's the 90th percentile arrival delay — who has the worst outliers?",
+    "What's the 95th percentile departure delay for each airport?",
+    # Weekday patterns by airport
+    "For flights going to Chicago O'Hare (ORD), how do arrival delays vary by day of week?",
+    "For flights leaving Atlanta (ATL), how do departure delays vary by day of week?",
+    # Combined metrics
+    "For each destination airport, what's the typical arrival delay and how many flights arrive really late (15+ minutes)?",
+    "In June 2015, for each airline, what was the typical departure delay and how many flights left really late (15+ minutes)?",
+    # Short vs long trips
+    "For each airline, how are arrival delays on their longer flights?",
+    "For each destination airport, how are arrival delays on longer flights coming in?",
+    # Simple sanity checks
+    "About how many flights are in this dataset?",
+    "What's the typical arrival delay overall?",
+]
+
+
+def sample_queries() -> List[str]:
+    """Return example natural language prompts for demo/evals."""
+    return EVAL_NL_QUERIES

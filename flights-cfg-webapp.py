@@ -1,4 +1,6 @@
 import os
+import asyncio
+import re
 import requests
 import pandas as pd
 from io import StringIO
@@ -8,7 +10,8 @@ from typing import Optional, Tuple, Any
 from monsterui.all import *
 from grammar import clickhouse_flights_grammar, sql_lark_cfg_tool
 from openai import AsyncAzureOpenAI
-from evals import grammar_accepts, is_valid_clickhouse_sql, policy_check
+from evals import grammar_accepts, is_valid_clickhouse_sql, policy_check, sample_queries
+import random
 
 load_dotenv()
 
@@ -98,6 +101,14 @@ async def generate_sql_from_nl(
             and isinstance(resp.output_text, str)
         ):
             llm_text = resp.output_text
+        # Fallback: extract SQL from plain text if tools didn't surface it
+        if sql_query is None and isinstance(llm_text, str):
+            m = re.search(r"SELECT\s", llm_text, flags=re.IGNORECASE)
+            if m:
+                cand = llm_text[m.start() :].strip()
+                if not cand.endswith(";"):
+                    cand += ";"
+                sql_query = cand
     except Exception:
         raise
 
@@ -184,31 +195,76 @@ _app_css = Style(
     """
     :root { --surface: #0c0f13; --surface-2:#0f141a; --border:#222933; --shadow: 0 10px 24px rgba(0,0,0,.35); }
     /* Force the Titled() H1 to align with our container */
-    body > h1:first-of-type {
-        width: min(1200px, 100% - 48px);
-        margin: 6rem auto 1rem auto !important; /* lots of vspace above header */
-        letter-spacing: .2px;
-        text-align: center; /* centered title */
-        display:block; box-sizing:border-box;
+    body h1, h1, .container h1, main h1 {
+        width: 100% !important;
+        margin: 6rem auto .75rem auto !important; /* generous top space */
+        letter-spacing: 1px !important;
+        text-align: center !important; /* centered title */
+        font-weight: 900 !important;
+        font-size: clamp(36px, 5vw, 56px) !important;
+        line-height: 1.1 !important;
+        text-wrap: balance !important;
+        display: block !important; 
+        box-sizing: border-box !important;
     }
-    .subtitle {
-        width: min(1200px, 100% - 48px);
-        margin: 0 auto 1.1rem auto;
-        text-align: center; /* centered subtitle */
-        display:block;
+    .subtitle, div.subtitle {
+        width: 100% !important;
+        margin: 0 auto 1.5rem auto !important;
+        text-align: center !important; /* centered subtitle */
+        font-size: 1.25rem !important;
+        font-weight: 700 !important;
+        opacity: .95 !important;
+        text-wrap: balance !important;
+        display: block !important;
+        letter-spacing: 0.5px !important;
+    }
+    /* Additional ultra-specific selectors to override any framework styles */
+    body > main > h1,
+    body > div > h1,
+    main > h1,
+    .container > h1 {
+        text-align: center !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+    }
+    body > main > .subtitle,
+    body > div > .subtitle,
+    main > .subtitle,
+    .container > .subtitle {
+        text-align: center !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
     }
     .container-narrow { width: min(1200px, 100% - 48px); margin-inline: auto; }
     .page-pad { padding-block: 1.25rem 2rem; }
-    .hero { margin-bottom: .5rem; }
+    .hero { margin-bottom: 4rem; }
     .hero h1 { margin-bottom: .25rem; }
+    .lead { width: min(900px, 100% - 48px); margin: .25rem auto .75rem auto; font-size: 1.06rem; line-height: 1.6; text-wrap: balance; text-align: center; }
     .muted { opacity:.85; font-size: .95rem; }
     .panel { border: 1px solid var(--border); border-radius: 12px; padding: 1rem; background: var(--surface-2); box-shadow: var(--shadow); }
     .panel h3 { margin: 0 0 .5rem 0; font-size: 0.98rem; opacity: .95; }
     .query-grid { display:grid; grid-template-columns: 1fr auto; gap: .9rem; align-items: start; }
-    .run-btn { align-self: start; justify-self: end; border-radius: 12px; padding-inline: 1.25rem; height: 52px; font-weight: 650; font-size: 16px; }
+    .run-btn { display: flex; align-items: center; justify-content: center; border-radius: 12px; padding-inline: 1.25rem; height: 52px; font-weight: 650; font-size: 16px; }
     .query-grid textarea { width: 100%; height: 52px; min-height: 52px; max-height: 52px; resize: none; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); color: inherit; padding: .9rem 1rem; }
-    .query-grid textarea::placeholder { opacity: .6; }
-    .results-grid { display:grid; grid-template-columns: 1fr; gap: 1.25rem; align-items:start; margin-top: 1rem; }
+    .query-grid textarea::placeholder { opacity: .7; font-style: italic; }
+    .form-title { margin-bottom: 1rem; font-size: 1.1rem; font-weight: 600; color: inherit; }
+    /* Suggestions */
+    .suggestions-wrap { margin: 1rem 0 0 0; padding: 0; }
+    .suggestions-compact { display:flex; align-items:center; gap:.75rem; flex-wrap:wrap; }
+    .suggestion-label { font-size: .9rem; opacity: .8; font-weight: 500; white-space: nowrap; }
+    .suggestions-inline { display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; }
+    .chip { border:1px solid var(--border); border-radius:999px; padding:.3rem .6rem; background:var(--surface); cursor:pointer; font-size: .85rem; transition: all 0.2s ease; }
+    .chip:hover { background: rgba(255,255,255,.06); border-color: rgba(255,255,255,.2); }
+    .reload-btn-small { padding: .2rem; width: 24px; height: 24px; border-radius: 4px; display: flex; align-items: center; justify-content: center; opacity: .7; }
+    .reload-btn-small:hover { background: rgba(255,255,255,.05); opacity: 1; }
+    /* Loading indicators */
+    .htmx-indicator { opacity: 0; transition: opacity 0.2s ease; }
+    .run-btn.htmx-request .htmx-indicator { opacity: 1; }
+    #results.htmx-request .htmx-indicator { opacity: 1; }
+    /* Hide content during loading */
+    #results.htmx-request > *:not(.loading-overlay) { opacity: 0.3; }
+    .loading-overlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 10; }
+    .results-grid { display:grid; grid-template-columns: 1fr; gap: 1.25rem; align-items:start; margin-top: 4rem; }
     .results-grid > * { width: 100%; }
     @media (min-width: 1100px) { .results-grid { grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr); } }
     .left-stack { display:grid; gap: 1rem; width: 100%; }
@@ -236,13 +292,22 @@ _app_css = Style(
     #results .dots:after { content: '…'; animation: dots 1.2s steps(4,end) infinite; }
     @keyframes dots { 0%,20%{content:''} 40%{content:'.'} 60%{content:'..'} 80%,100%{content:'...'} }
     /* Evals styling */
-    .evals-section { margin-top: 1rem; }
-    .eval-grid { display:grid; grid-template-columns: 1fr; gap: 1rem; }
+    .evals-section { margin-top: 2.5rem; }
+    .evals-section > h3 { margin: 0 0 1rem 0; }
+    .eval-grid { display:grid; grid-template-columns: 1fr; gap: 2rem; }
     @media (min-width: 900px) { .eval-grid { grid-template-columns: repeat(3, 1fr); } }
     .eval-tile { position: relative; }
-    .eval-help { margin-left: .5rem; display:inline-flex; align-items:center; justify-content:center; width: 18px; height: 18px; border-radius: 999px; border: 1px solid var(--border); font-weight:700; font-size:.8rem; opacity:.8; cursor: help; }
     .status-pass { color: #32d296; font-weight: 600; }
     .status-fail { color: #ff6b6b; font-weight: 600; }
+    .eval-title { display:flex; align-items:center; justify-content: space-between; gap: .75rem; margin-bottom: .35rem; }
+    .badge { border:1px solid var(--border); border-radius: 6px; padding: .15rem .5rem; font-size: .78rem; font-weight: 650; line-height: 1.2; }
+    .badge-pass { color:#32d296; background: rgba(50,210,150,.08); border-color: rgba(50,210,150,.35); }
+    .badge-fail { color:#ff6b6b; background: rgba(255,107,107,.10); border-color: rgba(255,107,107,.40); }
+    .eval-desc { margin: .15rem 0 .5rem 0; opacity: .9; }
+    .eval-code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+                font-size: .85rem; line-height: 1.3; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
+                background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: .6rem .75rem;
+                max-height: 200px; width: 100%; overflow: auto; margin: .25rem 0; }
     """
 )
 hdrs = (*_theme_hdrs, _app_css)
@@ -252,46 +317,109 @@ setup_toasts(app)
 
 def mk_layout(content: Any) -> Any:
     """Standard page layout wrapper (no duplicated titles)."""
-    title = "Flights CFG Demo"
-    subtitle = "Query ClickHouse with natural language (LLM -> SQL)"
+    title = "Flight Delay Explorer"
+    subtitle = "Ask in English → SQL → ClickHouse answers → we summarize"
     # Titled already provides <title> and <h1>
     return Titled(
         title,
-        Div(subtitle, cls="muted tight container-narrow subtitle"),
+        Div(
+            subtitle,
+            cls="muted tight subtitle",
+        ),
         Div(content, cls="container-narrow page-pad"),
     )
 
 
 def mk_form() -> Any:
     """Create a compact query form with inline run button and spinner."""
-    example = "sum the total of all flights in the last 30 hours of today in 2015"
-    input_box = Textarea(
-        id="nl_query", name="nl_query", rows=3, placeholder=f"e.g. {example}"
+    example = (
+        "Try: morning vs evening delays by airline, or top airports by delayed arrivals"
     )
-    spinner = Loading(cls="htmx-indicator", htmx_indicator=True)
+    input_box = Textarea(
+        id="nl_query",
+        name="nl_query",
+        rows=3,
+        placeholder=f"e.g. {example}",
+    )
     form = Form(
         hx_post=run.to(),
         hx_target="#results",
         hx_swap="outerHTML",
         hx_indicator="#results",
+        # Allow button submit and throttled Enter from textarea
+        hx_trigger="submit, keydown[key=='Enter'&&!shiftKey] from:#nl_query consume throttle:900ms",
+        # Make extra presses impossible while a request is in flight
+        hx_disabled_elt="#nl_query, .run-btn",
         cls="panel",
     )(
+        H3("Ask the flights dataset", cls="form-title"),
         Div(
             input_box,
-            Button("Run", type="submit", cls=f"{ButtonT.primary} run-btn"),
+            Button(
+                "Run",
+                type="submit",
+                cls=f"{ButtonT.primary} run-btn",
+                hx_indicator="this",
+            ),
             cls="query-grid",
         ),
-        Div(Span("Table: flights_df", cls="muted"), cls="tight"),
+        render_suggestions(),
     )
     return form
+
+
+def _pick_suggestions(n: int = 4) -> list[str]:
+    try:
+        pool = sample_queries()
+        return random.sample(pool, k=min(n, len(pool)))
+    except Exception:
+        return []
+
+
+def _suggestion_chip(text: str) -> Any:
+    return Span(
+        text,
+        cls="chip",
+        data_suggestion=text,
+        onclick=f"const t = document.getElementById('nl_query'); t.value = '{text}'; t.focus(); console.log('Filled with: {text}'); setTimeout(() => htmx.trigger(t.form, 'submit'), 100);",
+    )
+
+
+def render_suggestions() -> Any:
+    suggestions_list = _pick_suggestions(1)
+    items = [_suggestion_chip(s) for s in suggestions_list] if suggestions_list else []
+    return Div(
+        Div(
+            Span("Try this example:", cls="suggestion-label"),
+            Div(*items, cls="suggestions-inline"),
+            Button(
+                UkIcon("refresh-cw", height=14),
+                cls=f"{ButtonT.ghost} reload-btn-small",
+                hx_get=suggestions.to(),
+                hx_target="#suggestions",
+                hx_swap="outerHTML",
+                title="Load another example",
+            ),
+            cls="suggestions-compact",
+        ),
+        id="suggestions",
+        cls="suggestions-wrap",
+    )
+
+
+@rt
+def suggestions():
+    return render_suggestions()
 
 
 @rt
 def index(req):
     hero = Div(
         P(
-            "Ask a question about flights. We'll convert it to SQL and run it in ClickHouse.",
-            cls="muted",
+            "Explore U.S. flight delays from 2015 using natural language. ",
+            "Ask about airlines, airports, specific dates, times of day, or delay patterns. ",
+            "Try queries like 'worst delays by airline' or 'morning vs evening departure delays.' ",
+            cls="muted lead",
         ),
         cls="hero",
     )
@@ -303,20 +431,73 @@ def index(req):
             cls="placeholder placeholder-idle muted",
         ),
         Div(
-            Span("Loading results", cls="dots"),
+            Div(
+                UkIcon("loader", height=16, cls="animate-spin mr-2"),
+                Span("Loading results", cls="dots"),
+                cls="flex items-center",
+            ),
             cls="placeholder placeholder-loading muted",
         ),
         id="results",
         cls="panel",
     )
 
-    body = Div(hero, mk_form(), res_placeholder, cls="space-y-3")
+    body = Div(hero, mk_form(), res_placeholder, cls="space-y-8")
     return mk_layout(body)
 
 
 def result_card(*children: Any) -> Any:
     """Wrap results nicely in a card with consistent id for HTMX target."""
-    return Div(*children, id="results")
+    # If no children provided, show a placeholder to ensure loading overlay is visible
+    if not children:
+        children = (
+            Div(
+                H3("Results"),
+                P("Processing your query...", cls="muted"),
+                cls="panel",
+            ),
+        )
+
+    return Div(
+        # Loading overlay that appears during HTMX requests
+        Div(
+            Div(
+                UkIcon("loader", height=20, cls="animate-spin mr-2"),
+                Span("Loading results", cls="dots"),
+                cls="flex items-center text-lg",
+            ),
+            cls="loading-overlay htmx-indicator bg-surface-2 rounded-lg px-4 py-3 border border-border shadow-lg",
+        ),
+        *children,
+        id="results",
+        cls="relative",
+    )
+
+
+def render_eval_tile(
+    title: str,
+    ok: bool,
+    description: str,
+    details: Optional[str] = None,
+    language: str = "text",
+) -> Any:
+    """Render a single eval tile.
+
+    - Shows a compact pass/fail badge inline with the title.
+    - Displays a clearer one-line description.
+    - Renders any details or errors in a code-style block for readability.
+    """
+    badge = Span(
+        "Pass" if ok else "Fail", cls=f"badge {'badge-pass' if ok else 'badge-fail'}"
+    )
+    blocks: list[Any] = [
+        Div(H3(title), badge, cls="eval-title"),
+        P(description, cls="eval-desc muted"),
+    ]
+    if not ok and details:
+        # Prefer a code-style block for errors/details for clarity
+        blocks.append(Div(Pre(Code(details)), cls="eval-code"))
+    return Div(*blocks, cls="panel eval-tile")
 
 
 @rt
@@ -344,7 +525,9 @@ async def run(nl_query: str = "", sess=None):
             raise RuntimeError("ClickHouse credentials are missing")
 
         try:
-            csv_text = run_clickhouse_query(sql_query, format_type="CSVWithNames")
+            csv_text = await asyncio.to_thread(
+                run_clickhouse_query, sql_query, "CSVWithNames"
+            )
         except requests.HTTPError as http_err:
             # Show both ClickHouse error and the LLM response + SQL
             err_alert = Alert(f"ClickHouse error: {http_err}", cls=AlertT.error)
@@ -362,7 +545,10 @@ async def run(nl_query: str = "", sess=None):
             if ch_detail is not None:
                 parts += [Divider(), Div(H3("ClickHouse response")), ch_detail]
             return result_card(*parts)
-        df = pd.read_csv(StringIO(csv_text)) if csv_text.strip() else pd.DataFrame()
+        if csv_text.strip():
+            df = await asyncio.to_thread(pd.read_csv, StringIO(csv_text))
+        else:
+            df = pd.DataFrame()
 
         # Let the LLM "see" the ClickHouse response and produce a brief summary
         llm_followup_text: Optional[str] = await llm_observe_clickhouse_result(
@@ -391,73 +577,57 @@ async def run(nl_query: str = "", sess=None):
         if llm_notes:
             left_pane_children.append(Div(H3("Model Notes"), P(llm_notes), cls="panel"))
         # Generated SQL panel (no copy buttons)
-        left_pane_children.append(Div(H3("Generated SQL"), sql_pre, cls="panel sql-wrap"))
+        left_pane_children.append(
+            Div(H3("Generated SQL"), sql_pre, cls="panel sql-wrap")
+        )
 
-        grid = Div(Div(*left_pane_children, cls="left-stack"), results_pane, cls="results-grid")
+        grid = Div(
+            Div(*left_pane_children, cls="left-stack"), results_pane, cls="results-grid"
+        )
         # ---------- Evals on the generated SQL ----------
-        eval_tiles = []
+        eval_tiles: list[Any] = []
+
         # 1) Grammar acceptance
         g_ok, g_msg = grammar_accepts(sql_query)
         eval_tiles.append(
-            Div(
-                Div(
-                    H3("Grammar Acceptance"),
-                    Span(
-                        "?",
-                        title="Checks the SQL against the custom Lark grammar (CFG).",
-                        cls="eval-help",
-                    ),
-                ),
-                P("Does the SQL conform to the flights CFG?", cls="muted"),
-                P(
-                    "Pass" if g_ok else f"Fail: {g_msg}",
-                    cls="status-pass" if g_ok else "status-fail",
-                ),
-                cls="panel eval-tile",
+            render_eval_tile(
+                title="Grammar Acceptance",
+                ok=g_ok,
+                description="Checks the SQL against the flights CFG.",
+                details=g_msg if not g_ok else None,
+                language="text",
             )
         )
 
         # 2) General SQL syntax under ClickHouse
         s_ok, s_msg = is_valid_clickhouse_sql(sql_query)
         eval_tiles.append(
-            Div(
-                Div(
-                    H3("ClickHouse Parse"),
-                    Span(
-                        "?",
-                        title="Parses with sqlglot using the ClickHouse dialect.",
-                        cls="eval-help",
-                    ),
-                ),
-                P("Is it valid ClickHouse SQL?", cls="muted"),
-                P(
-                    "Pass" if s_ok else f"Fail: {s_msg}",
-                    cls="status-pass" if s_ok else "status-fail",
-                ),
-                cls="panel eval-tile",
+            render_eval_tile(
+                title="ClickHouse Parse",
+                ok=s_ok,
+                description="Parses the SQL with the ClickHouse dialect (sqlglot).",
+                details=s_msg if not s_ok else None,
+                language="text",
             )
         )
 
         # 3) Policy / safety
         p_ok, p_problems = policy_check(sql_query)
-        p_desc = "Read-only; only whitelisted cols/funcs; no joins/unions/CTEs."
-        p_detail = "OK" if p_ok else ("; ".join(p_problems) or "Unknown policy issue")
+        p_desc = "Read-only SELECT; only whitelisted columns/functions; no joins, unions, CTEs, subqueries, or window clauses."
+        # Format problems as a simple markdown-style bullet list in a code view
+        p_detail = None
+        if not p_ok:
+            if p_problems:
+                p_detail = "\n".join(f"- {x}" for x in p_problems)
+            else:
+                p_detail = "Unknown policy issue."
         eval_tiles.append(
-            Div(
-                Div(
-                    H3("Policy & Safeguards"),
-                    Span(
-                        "?",
-                        title="Enforces read-only and whitelists. Forbids joins, unions, DDL, etc.",
-                        cls="eval-help",
-                    ),
-                ),
-                P(p_desc, cls="muted"),
-                P(
-                    "Pass" if p_ok else f"Fail: {p_detail}",
-                    cls="status-pass" if p_ok else "status-fail",
-                ),
-                cls="panel eval-tile",
+            render_eval_tile(
+                title="Policy & Safeguards",
+                ok=p_ok,
+                description=p_desc,
+                details=p_detail,
+                language="text",
             )
         )
 
