@@ -7,6 +7,7 @@
 
 ## The dataset
 - **Source**: "2015 Flight Delays and Cancellations" (U.S. DOT, via Kaggle, CC0). It contains one year of domestic U.S. flights with on‑time, delay, cancelation signals.
+- **Dataset Link**: https://www.kaggle.com/datasets/usdot/flight-delays/data?select=flights.csv
 - **Scope**: ~5.8M flight rows across 14 airlines and 600+ airports. We ingested a practical subset of the main `flights.csv` for this demo.
 - **What's in our table**:
   - **Airline and airports**: `AIRLINE`, `ORIGIN_AIRPORT`, `DESTINATION_AIRPORT`
@@ -51,7 +52,7 @@
 - Three simple checks give you instant confidence without digging into logs.
 
 ## What's in the repo (for the curious)
-- `flights-cfg-webapp.py`: the app and UI
+- `main.py`: app entrypoint (FastHTML server)
 - `grammar.py`: the tiny SQL grammar
 - `evals.py`: the three quick checks
 
