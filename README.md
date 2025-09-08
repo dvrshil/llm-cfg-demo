@@ -1,5 +1,7 @@
 # Flight Delay Explorer — Ask in English, get answers
 
+Live Demo Link: https://llm-cfg-demo.vercel.app/
+
 ## What this is
 - A tiny app where you ask a question in plain English and it returns answers from a flights dataset.
 - The model writes the SQL for you, but we keep it safe and predictable using a small grammar so it can't go off‑track.
@@ -34,16 +36,10 @@
    - **Generated SQL**: the exact query that was executed (nicely wrapped and scrollable).
    - **Results**: a tidy table you can skim.
 4. **Check the quick evals**
-   - **Grammar Acceptance**: "Does this match our tiny SQL shape?"
+   - **Grammar Acceptance**: "Does this match our Lark grammar made for SQL?"
    - **ClickHouse Parse**: "Does it parse as valid SQL?"
-   - **Policy & Safeguards**: "Is it read‑only and using allowed bits?"
-   - Hover the little ? icons for a one‑liner about each.
+   - **Policy & Safeguards**: "Is it read‑only and using allowed functions and available columns?"
 
-## What you'll see
-- A compact input and Run button at the top.
-- **Left**: "Model on Results" and "Generated SQL".
-- **Right**: the results table (scrolls if it's wide or long).
-- **Bottom**: three quick checks with pass/fail badges.
 
 ## How it works (at a glance)
 - A small grammar constrains the model to a safe subset of SQL.
@@ -66,13 +62,9 @@
 - You get natural‑language speed with SQL transparency: you can always see the query that ran.
 
 ## About the evals
-- **Grammar Acceptance** — matches our tiny SQL shape
-- **ClickHouse Parse** — parses as valid SQL
-- **Policy & Safeguards** — read‑only, whitelisted pieces only
-
-## Extending
-- Want more columns or functions? Expand the grammar and the checks.
-- Want different data? Point the app to a new table and adjust the prompts.
+- **Grammar Acceptance** — matches our SQL requirements using Lark grammar we defined for the model to generate the SQL query in
+- **ClickHouse Parse** — checks if a given query is valid SQL
+- **Policy & Safeguards** — whether query is read‑only, whitelisted functions and availble columns only
 
 ## Notes
 - The grammar is intentionally small to keep the demo sturdy. If you want more expressiveness (e.g., OR in filters), you can grow it.

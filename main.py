@@ -82,7 +82,42 @@ async def generate_sql_from_nl(
             if hasattr(item, "input") and isinstance(getattr(item, "input"), str):
                 candidate = getattr(item, "input")
                 if "SELECT" in candidate.upper():
-                    sql_query = candidate
+                    # Clean up the candidate to remove any metadata
+                    candidate = candidate.strip()
+
+                    # Use regex to extract just the SQL part
+                    sql_match = re.search(
+                        r"(SELECT\s+.*?;)", candidate, re.IGNORECASE | re.DOTALL
+                    )
+                    if sql_match:
+                        sql_query = sql_match.group(1).strip()
+                    else:
+                        # Fallback: filter out lines that look like debug/metadata
+                        lines = candidate.split("\n")
+                        sql_lines = []
+                        for line in lines:
+                            line = line.strip()
+                            # More comprehensive filtering
+                            if (
+                                line
+                                and not any(
+                                    keyword in line
+                                    for keyword in [
+                                        "type=",
+                                        "logprobs=",
+                                        "annotations=",
+                                        "ResponseOutputText",
+                                        "text=",
+                                        "output_text",
+                                        "logprobs=None",
+                                    ]
+                                )
+                                and not line.startswith("[")
+                                and not line.startswith("(")
+                            ):
+                                sql_lines.append(line)
+                        if sql_lines:
+                            sql_query = " ".join(sql_lines)
             if typ == "message" and hasattr(item, "content"):
                 try:
                     llm_text = str(item.content)
@@ -105,10 +140,53 @@ async def generate_sql_from_nl(
         if sql_query is None and isinstance(llm_text, str):
             m = re.search(r"SELECT\s", llm_text, flags=re.IGNORECASE)
             if m:
+                # Extract everything from SELECT to the end, then clean it up
                 cand = llm_text[m.start() :].strip()
-                if not cand.endswith(";"):
-                    cand += ";"
-                sql_query = cand
+
+                # Use regex to extract just the SQL part first
+                sql_match = re.search(
+                    r"(SELECT\s+.*?;)", cand, re.IGNORECASE | re.DOTALL
+                )
+                if sql_match:
+                    sql_query = sql_match.group(1).strip()
+                else:
+                    # Try to find the end of the SQL statement
+                    # Look for semicolon or end of meaningful SQL content
+                    lines = cand.split("\n")
+                    sql_lines = []
+                    for line in lines:
+                        line = line.strip()
+                        # Skip empty lines and lines that look like metadata/debug info
+                        if (
+                            not line
+                            or any(
+                                keyword in line
+                                for keyword in [
+                                    "type=",
+                                    "logprobs=",
+                                    "annotations=",
+                                    "ResponseOutputText",
+                                    "text=",
+                                    "output_text",
+                                    "logprobs=None",
+                                ]
+                            )
+                            or line.startswith("[")
+                            or line.startswith("(")
+                        ):
+                            if sql_lines:  # If we already have SQL content, stop here
+                                break
+                            continue
+                        sql_lines.append(line)
+                        # Stop if we hit a semicolon
+                        if line.endswith(";"):
+                            break
+
+                    if sql_lines:
+                        cand = " ".join(sql_lines)
+                        if not cand.endswith(";"):
+                            cand += ";"
+                        sql_query = cand
     except Exception:
         raise
 
@@ -156,7 +234,11 @@ async def llm_observe_clickhouse_result(
         followup_instructions = (
             "Here's the result of executing a ClickHouse query. "
             "Do not generate any new SQL now, unless an error occurred. Provide a concise "
-            "summary or 2-3 observations. If the table is empty, state that clearly."
+            "summary or 2-3 observations."
+            "Only use bullets to format your response. Make the report as easy and interesting as possible."
+            "Only when mentioning flight or airport names, include ID guide for them in your response at the bottom."
+            "Use proper units behind numbers, they are in mins., miles or HHMM format"
+            "Keep it under 100 words"
         )
 
         followup_input = (
@@ -170,6 +252,7 @@ async def llm_observe_clickhouse_result(
             model="gpt-5-mini",
             input=followup_input,
             text={"format": {"type": "text"}},
+            reasoning={"effort": "low"},
             parallel_tool_calls=False,
         )
         # Prefer output_text if present; otherwise scan items
@@ -264,7 +347,7 @@ _app_css = Style(
     /* Hide content during loading */
     #results.htmx-request > *:not(.loading-overlay) { opacity: 0.3; }
     .loading-overlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 10; }
-    .results-grid { display:grid; grid-template-columns: 1fr; gap: 1.25rem; align-items:start; margin-top: 4rem; }
+    .results-grid { display:grid; grid-template-columns: 1fr; gap: 1.25rem; align-items:start; margin-top: 1rem; }
     .results-grid > * { width: 100%; }
     @media (min-width: 1100px) { .results-grid { grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr); } }
     .left-stack { display:grid; gap: 1rem; width: 100%; }
@@ -278,10 +361,9 @@ _app_css = Style(
                 max-height: 380px; overflow: auto; margin: 0; }
     /* Table polish + scroll */
     .table-scroll { width: 100%; overflow: auto; max-height: 420px; }
-    #results table { min-width: 100%; width: max-content; border-collapse: separate; border-spacing: 0; white-space: nowrap; }
-    #results thead th { position: sticky; top: 0; background: var(--surface-2); z-index: 1; }
-    #results th, #results td { padding: .5rem .75rem; border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); font-size: .92rem; }
-    #results th:first-child, #results td:first-child { border-left: 1px solid var(--border); }
+    #results table { min-width: 100%; width: max-content; border-collapse: collapse; white-space: nowrap; border: 1px solid var(--border); }
+    #results thead th { position: sticky; top: 0; background: var(--surface-2); z-index: 1; text-align: left; }
+    #results th, #results td { padding: .5rem .75rem; border: 1px solid var(--border); font-size: .92rem; text-align: left; }
     #results tr:hover td { background: rgba(255,255,255,.02); }
     .tight { margin-block: .5rem; }
     /* Placeholder phases inside results */
@@ -291,26 +373,40 @@ _app_css = Style(
     #results.htmx-request .placeholder-loading { display:block; }
     #results .dots:after { content: '…'; animation: dots 1.2s steps(4,end) infinite; }
     @keyframes dots { 0%,20%{content:''} 40%{content:'.'} 60%{content:'..'} 80%,100%{content:'...'} }
-    /* Evals styling */
+    /* Results and Evals styling */
+    .results-section { margin-top: 1rem; }
+    .results-section > h3 { margin: 0 0 0.5rem 0; }
     .evals-section { margin-top: 2.5rem; }
     .evals-section > h3 { margin: 0 0 1rem 0; }
     .eval-grid { display:grid; grid-template-columns: 1fr; gap: 2rem; }
     @media (min-width: 900px) { .eval-grid { grid-template-columns: repeat(3, 1fr); } }
-    .eval-tile { position: relative; }
+    /* Stack vertically when there are multiple failures for better readability */
+    .eval-grid.multiple-failures { grid-template-columns: 1fr !important; }
+    .eval-tile { position: relative; width: 100%; max-width: 100%; box-sizing: border-box; overflow: hidden; }
     .status-pass { color: #32d296; font-weight: 600; }
     .status-fail { color: #ff6b6b; font-weight: 600; }
     .eval-title { display:flex; align-items:center; justify-content: space-between; gap: .75rem; margin-bottom: .35rem; }
     .badge { border:1px solid var(--border); border-radius: 6px; padding: .15rem .5rem; font-size: .78rem; font-weight: 650; line-height: 1.2; }
     .badge-pass { color:#32d296; background: rgba(50,210,150,.08); border-color: rgba(50,210,150,.35); }
-    .badge-fail { color:#ff6b6b; background: rgba(255,107,107,.10); border-color: rgba(255,107,107,.40); }
+    .badge-fail { color:#ff6b6b; background: rgba(255,107,107,.10); border-color: rgba(255,107,107,.40); }¸
     .eval-desc { margin: .15rem 0 .5rem 0; opacity: .9; }
     .eval-code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
                 font-size: .85rem; line-height: 1.3; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
                 background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: .6rem .75rem;
-                max-height: 200px; width: 100%; overflow: auto; margin: .25rem 0; }
+                max-height: 200px; width: 100%; max-width: 100%; overflow: auto; margin: .25rem 0; box-sizing: border-box; }
+    /* Schema modal styling */
+    .schema-modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); 
+                   display: flex; align-items: center; justify-content: center; z-index: 1000; }
+    .schema-content { background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; 
+                     padding: 2rem; max-width: 90vw; max-height: 80vh; overflow: auto; position: relative; }
+    .schema-table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+    .schema-table th, .schema-table td { padding: 0.75rem; text-align: left; border: 1px solid var(--border); }
+    .schema-table th { background: var(--surface); font-weight: 600; }
+    .schema-table tr:hover td { background: rgba(255,255,255,.02); }
+    .schema-close { position: absolute; top: 1rem; right: 1rem; }
     """
 )
-hdrs = (*_theme_hdrs, _app_css)
+hdrs = (*_theme_hdrs, MarkdownJS(), _app_css)
 app, rt = fast_app(hdrs=hdrs)
 setup_toasts(app)
 
@@ -399,6 +495,8 @@ def render_suggestions() -> Any:
                 hx_target="#suggestions",
                 hx_swap="outerHTML",
                 title="Load another example",
+                type="button",
+                onclick="event.stopPropagation(); event.preventDefault();",
             ),
             cls="suggestions-compact",
         ),
@@ -413,6 +511,79 @@ def suggestions():
 
 
 @rt
+def show_schema():
+    """Display the database schema in a modal."""
+    schema_data = [
+        ("AIRLINE", "String", "Airline code (e.g., AA, DL, UA)"),
+        ("ORIGIN_AIRPORT", "String", "Origin airport code (e.g., LAX, JFK)"),
+        ("DESTINATION_AIRPORT", "String", "Destination airport code"),
+        ("FLIGHT_DATE", "Date", "Flight date (YYYY-MM-DD format)"),
+        ("DAY_OF_WEEK", "Int64", "Day of week (1=Monday, 7=Sunday)"),
+        ("SCHEDULED_DEPARTURE", "Int64", "Scheduled departure time (HHMM format)"),
+        ("SCHEDULED_ARRIVAL", "Int64", "Scheduled arrival time (HHMM format)"),
+        ("DEPARTURE_DELAY", "Float64", "Departure delay in minutes"),
+        ("ARRIVAL_DELAY", "Float64", "Arrival delay in minutes"),
+        ("DISTANCE", "Int64", "Flight distance in miles"),
+        ("AIR_TIME", "Float64", "Flight time in minutes"),
+        ("ELAPSED_TIME", "Float64", "Total elapsed time in minutes"),
+        ("SCHEDULED_TIME", "Float64", "Scheduled flight time in minutes"),
+    ]
+
+    table_rows = []
+    for field, field_type, description in schema_data:
+        table_rows.append(
+            Tr(
+                Td(Strong(field)),
+                Td(field_type, style="font-family: ui-monospace, monospace;"),
+                Td(description, cls="muted"),
+            )
+        )
+
+    modal_content = Div(
+        Button(
+            UkIcon("x", height=16),
+            cls=f"{ButtonT.ghost} schema-close",
+            hx_get="/",
+            hx_target="body",
+            hx_swap="outerHTML",
+        ),
+        H2("Database Schema: flights_df"),
+        P("U.S. flight delay data from 2015", cls="muted"),
+        Div(
+            P(
+                Strong("Dataset: "),
+                "2015 Flight Delays and Cancellations from U.S. DOT (via Kaggle). ",
+                "Contains ~5.8M domestic U.S. flights across 14 airlines and 600+ airports, ",
+                "with on-time performance, delay, and cancellation data.",
+            ),
+            style="background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin: 1rem 0; font-size: 0.9rem;",
+        ),
+        Table(
+            Thead(
+                Tr(
+                    Th("Column"),
+                    Th("Type"),
+                    Th("Description"),
+                )
+            ),
+            Tbody(*table_rows),
+            cls="schema-table",
+        ),
+        cls="schema-content",
+    )
+
+    return Div(
+        modal_content,
+        cls="schema-modal",
+        hx_get="/",
+        hx_target="body",
+        hx_swap="outerHTML",
+        hx_trigger="click from:body",
+        onclick="if (event.target === this) { htmx.ajax('GET', '/', {target: 'body', swap: 'outerHTML'}); }",
+    )
+
+
+@rt
 def index(req):
     hero = Div(
         P(
@@ -422,6 +593,19 @@ def index(req):
             cls="muted lead",
         ),
         cls="hero",
+    )
+
+    schema_button = Div(
+        Button(
+            "Whats is this Dataset?",
+            type="button",
+            cls=f"{ButtonT.ghost}",
+            hx_get=show_schema.to(),
+            hx_target="#schema-modal",
+            hx_swap="outerHTML",
+            style="border-radius: 8px;",
+        ),
+        style="text-align: center; margin-top: 1rem; margin-bottom: 2rem;",
     )
 
     res_placeholder = Div(
@@ -442,7 +626,12 @@ def index(req):
         cls="panel",
     )
 
-    body = Div(hero, mk_form(), res_placeholder, cls="space-y-8")
+    # Hidden schema modal container
+    schema_modal = Div(id="schema-modal")
+
+    body = Div(
+        hero, schema_button, mk_form(), res_placeholder, schema_modal, cls="space-y-8"
+    )
     return mk_layout(body)
 
 
@@ -500,6 +689,54 @@ def render_eval_tile(
     return Div(*blocks, cls="panel eval-tile")
 
 
+def render_all_evals(sql_query: str) -> Any:
+    """Construct all eval tiles for a given SQL string."""
+    tiles: list[Any] = []
+    results: list[bool] = []
+
+    g_ok, g_msg = grammar_accepts(sql_query)
+    results.append(g_ok)
+    tiles.append(
+        render_eval_tile(
+            title="Grammar Checker",
+            ok=g_ok,
+            description="(Validates our Lark grammar for SQL)",
+            details=g_msg if not g_ok else None,
+        )
+    )
+    s_ok, s_msg = is_valid_clickhouse_sql(sql_query)
+    results.append(s_ok)
+    tiles.append(
+        render_eval_tile(
+            title="SQL Syntax Checker",
+            ok=s_ok,
+            description="(Checks if the SQL is valid)",
+            details=s_msg if not s_ok else None,
+        )
+    )
+    p_ok, p_problems = policy_check(sql_query)
+    results.append(p_ok)
+    p_detail = (
+        None
+        if p_ok
+        else ("\n".join(f"- {x}" for x in p_problems) or "Unknown policy issue.")
+    )
+    tiles.append(
+        render_eval_tile(
+            title="Policy & Safeguards",
+            ok=p_ok,
+            description="(Checks for allowed columns and SQL operations)",
+            details=p_detail,
+        )
+    )
+
+    # Count failures and add class for vertical stacking if multiple failures
+    failure_count = sum(1 for result in results if not result)
+    grid_class = "eval-grid multiple-failures" if failure_count >= 2 else "eval-grid"
+
+    return Div(H3("SQL Evals"), Div(*tiles, cls=grid_class), cls="evals-section")
+
+
 @rt
 async def run(nl_query: str = "", sess=None):
     try:
@@ -508,7 +745,7 @@ async def run(nl_query: str = "", sess=None):
 
         sql_query, llm_text = await generate_sql_from_nl(nl_query.strip())
 
-        # If no SQL was extracted, still show the LLM response so users can see what happened
+        # If no SQL was extracted, still show the LLM response and try evals
         if not sql_query:
             warn = Alert(
                 "Could not extract SQL from model response.", cls=AlertT.warning
@@ -518,7 +755,19 @@ async def run(nl_query: str = "", sess=None):
                 if llm_text
                 else P("No model text returned.")
             )
-            return result_card(warn, Divider(), llm_block)
+            # Best‑effort: search for a SELECT in the text and run evals on it
+            evals_section = None
+            if isinstance(llm_text, str):
+                m = re.search(r"SELECT\s", llm_text, flags=re.IGNORECASE)
+                if m:
+                    cand = llm_text[m.start() :].strip()
+                    if not cand.endswith(";"):
+                        cand += ";"
+                    evals_section = render_all_evals(cand)
+            parts = [warn, Divider(), llm_block]
+            if evals_section is not None:
+                parts += [Divider(), evals_section]
+            return result_card(*parts)
 
         # Execute with ClickHouse
         if not key_id or not key_secret:
@@ -539,7 +788,16 @@ async def run(nl_query: str = "", sess=None):
                     ch_detail = Pre(Code(http_err.response.text))
             except Exception:
                 pass
-            parts = [err_alert, Divider(), DivLAligned(H3("Generated SQL")), sql_block]
+            # Always include evals even when execution fails
+            evals_section = render_all_evals(sql_query)
+            parts = [
+                err_alert,
+                Divider(),
+                DivLAligned(H3("Generated SQL")),
+                sql_block,
+                Divider(),
+                evals_section,
+            ]
             if llm_block is not None:
                 parts += [Divider(), llm_block]
             if ch_detail is not None:
@@ -560,7 +818,6 @@ async def run(nl_query: str = "", sess=None):
         llm_notes = llm_text if llm_text else None
 
         results_pane = Div(
-            H3("Results"),
             (
                 render_df_table(df)
                 if not df.empty
@@ -572,10 +829,12 @@ async def run(nl_query: str = "", sess=None):
         left_pane_children = []
         if llm_followup_text:
             left_pane_children.append(
-                Div(H3("Model on Results"), P(llm_followup_text), cls="panel")
+                Div(
+                    H3("Model's Summary of Results"),
+                    Div(llm_followup_text, cls="marked"),
+                    cls="panel",
+                )
             )
-        if llm_notes:
-            left_pane_children.append(Div(H3("Model Notes"), P(llm_notes), cls="panel"))
         # Generated SQL panel (no copy buttons)
         left_pane_children.append(
             Div(H3("Generated SQL"), sql_pre, cls="panel sql-wrap")
@@ -585,57 +844,14 @@ async def run(nl_query: str = "", sess=None):
             Div(*left_pane_children, cls="left-stack"), results_pane, cls="results-grid"
         )
         # ---------- Evals on the generated SQL ----------
-        eval_tiles: list[Any] = []
+        evals_section = render_all_evals(sql_query)
 
-        # 1) Grammar acceptance
-        g_ok, g_msg = grammar_accepts(sql_query)
-        eval_tiles.append(
-            render_eval_tile(
-                title="Grammar Acceptance",
-                ok=g_ok,
-                description="Checks the SQL against the flights CFG.",
-                details=g_msg if not g_ok else None,
-                language="text",
-            )
+        return result_card(
+            Div(H3("Results"), Div(grid, evals_section), cls="results-section"),
+            Script(
+                "setTimeout(() => proc_htmx('.marked', e => e.innerHTML = marked.parse(e.textContent)), 100);"
+            ),
         )
-
-        # 2) General SQL syntax under ClickHouse
-        s_ok, s_msg = is_valid_clickhouse_sql(sql_query)
-        eval_tiles.append(
-            render_eval_tile(
-                title="ClickHouse Parse",
-                ok=s_ok,
-                description="Parses the SQL with the ClickHouse dialect (sqlglot).",
-                details=s_msg if not s_ok else None,
-                language="text",
-            )
-        )
-
-        # 3) Policy / safety
-        p_ok, p_problems = policy_check(sql_query)
-        p_desc = "Read-only SELECT; only whitelisted columns/functions; no joins, unions, CTEs, subqueries, or window clauses."
-        # Format problems as a simple markdown-style bullet list in a code view
-        p_detail = None
-        if not p_ok:
-            if p_problems:
-                p_detail = "\n".join(f"- {x}" for x in p_problems)
-            else:
-                p_detail = "Unknown policy issue."
-        eval_tiles.append(
-            render_eval_tile(
-                title="Policy & Safeguards",
-                ok=p_ok,
-                description=p_desc,
-                details=p_detail,
-                language="text",
-            )
-        )
-
-        evals_section = Div(
-            H3("SQL Evals"), Div(*eval_tiles, cls="eval-grid"), cls="evals-section"
-        )
-
-        return result_card(Div(grid, evals_section))
 
     except Exception as e:
         msg = str(e)
