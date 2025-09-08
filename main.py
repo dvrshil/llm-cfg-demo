@@ -1,4 +1,6 @@
 import os
+import logging
+import time
 import asyncio
 import re
 import requests
@@ -12,8 +14,17 @@ from grammar import clickhouse_flights_grammar, sql_lark_cfg_tool
 from openai import AsyncAzureOpenAI
 from evals import grammar_accepts, is_valid_clickhouse_sql, policy_check, sample_queries
 import random
+import json
 
 load_dotenv()
+
+# Configure logging
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+logger = logging.getLogger("app")
 
 # ClickHouse Cloud API credentials
 key_id = os.environ.get("CH_KEY_ID")
@@ -24,6 +35,8 @@ service_id = "88ac54be-2166-445d-9172-dc3173309069"
 def run_clickhouse_query(sql_query: str, format_type: str = "CSVWithNames") -> str:
     """Execute SQL query against ClickHouse Cloud using REST API"""
     url = f"https://queries.clickhouse.cloud/service/{service_id}/run"
+    t0 = time.perf_counter()
+    logger.info("CH: start; sql_len=%d format=%s", len(sql_query or ""), format_type)
     response = requests.post(
         url,
         auth=(key_id, key_secret),
@@ -33,6 +46,8 @@ def run_clickhouse_query(sql_query: str, format_type: str = "CSVWithNames") -> s
         timeout=45,
     )
     response.raise_for_status()
+    t1 = time.perf_counter()
+    logger.info("CH: end; dur=%.3fs resp_len=%d", t1 - t0, len(response.text or ""))
     return response.text
 
 
@@ -47,7 +62,8 @@ async def generate_sql_from_nl(
     natural_language_query: str,
 ) -> Tuple[Optional[str], Optional[str]]:
     """Use Azure OpenAI with a grammar tool to produce a safe SQL string and optional model text."""
-
+    t0 = time.perf_counter()
+    logger.info("LLM1: start; nl_len=%d", len(natural_language_query or ""))
     prompt = (
         "You translate natural language into valid ClickHouse SQL over table flights_df.\n"
         "Constraints (must follow): SELECT-only; FROM flights_df; WHERE supports AND only; GROUP BY; ORDER BY; LIMIT.\n"
@@ -59,7 +75,7 @@ async def generate_sql_from_nl(
         "Aggregates permitted: avg,sum,min,max,count,countIf(cond),quantileTDigest/Exact(p)(field).\n"
         "If filtering by hour, use the intDiv-derived expressions or the provided BETWEEN hour clauses.\n"
         "Use only constructs allowed by the provided grammar. End every statement with a semicolon.\n"
-        "Only return a valid SQL statement during the first turn of the conversation, and nothing else.\n"
+        "Only return a valid SQL statement through the clickhouse_sql_grammar tool, and nothing else.\n"
         "User request: " + natural_language_query
     )
 
@@ -69,7 +85,7 @@ async def generate_sql_from_nl(
         text={"format": {"type": "text"}},
         tools=[sql_lark_cfg_tool],
         parallel_tool_calls=False,
-        reasoning={"effort": "low"},
+        reasoning={"effort": "minimal"},
     )
 
     sql_query: Optional[str] = None
@@ -191,11 +207,17 @@ async def generate_sql_from_nl(
         raise
 
     if not sql_query:
+        t1 = time.perf_counter()
+        logger.info("LLM1: end; dur=%.3fs; sql_extracted=no", t1 - t0)
         # No SQL extracted; still return any model text captured
         return None, llm_text
     sql_query = sql_query.strip()
     if not sql_query.endswith(";"):
         sql_query += ";"
+    t1 = time.perf_counter()
+    logger.info(
+        "LLM1: end; dur=%.3fs; sql_extracted=yes sql_len=%d", t1 - t0, len(sql_query)
+    )
     return sql_query, llm_text
 
 
@@ -230,13 +252,18 @@ async def llm_observe_clickhouse_result(
     model summary/acknowledgment for display, or None if not available.
     """
     try:
+        t0 = time.perf_counter()
+        logger.info(
+            "LLM2: start; sql_len=%d csv_len=%d",
+            len(sql_query or ""),
+            len(csv_text or ""),
+        )
         trimmed_csv = _truncate_text(csv_text or "")
         followup_instructions = (
             "Here's the result of executing a ClickHouse query. "
             "Do not generate any new SQL now, unless an error occurred. Provide a concise "
             "summary or 2-3 observations."
             "Only use bullets to format your response. Make the report as easy and interesting as possible."
-            "Only when mentioning flight or airport names, include ID guide for them in your response at the bottom."
             "Use proper units behind numbers, they are in mins., miles or HHMM format"
             "Keep it under 100 words"
         )
@@ -251,18 +278,27 @@ async def llm_observe_clickhouse_result(
         resp = await client.responses.create(
             model="gpt-5-mini",
             input=followup_input,
-            text={"format": {"type": "text"}},
+            text={"format": {"type": "text"}, "verbosity": "low"},
             reasoning={"effort": "minimal"},
             parallel_tool_calls=False,
         )
         # Prefer output_text if present; otherwise scan items
         if hasattr(resp, "output_text") and isinstance(resp.output_text, str):
+            t1 = time.perf_counter()
+            logger.info(
+                "LLM2: end; dur=%.3fs; has_summary=%s", t1 - t0, bool(resp.output_text)
+            )
             return resp.output_text
         for item in getattr(resp, "output", []) or []:
             typ = getattr(item, "type", None)
             if typ == "message" and hasattr(item, "content"):
                 try:
-                    return str(item.content)
+                    out = str(item.content)
+                    t1 = time.perf_counter()
+                    logger.info(
+                        "LLM2: end; dur=%.3fs; has_summary=%s", t1 - t0, bool(out)
+                    )
+                    return out
                 except Exception:
                     pass
     except Exception:
@@ -444,7 +480,7 @@ def mk_form() -> Any:
         hx_swap="outerHTML",
         hx_indicator="#results",
         # Allow button submit and throttled Enter from textarea
-        hx_trigger="submit, keydown[key=='Enter'&&!shiftKey] from:#nl_query consume throttle:900ms",
+        hx_trigger="submit, keydown[key=='Enter'&&!shiftKey] from:#nl_query consume throttle:200ms",
         # Make extra presses impossible while a request is in flight
         hx_disabled_elt="#nl_query, .run-btn",
         cls="panel",
@@ -478,7 +514,7 @@ def _suggestion_chip(text: str) -> Any:
         text,
         cls="chip",
         data_suggestion=text,
-        onclick=f"const t = document.getElementById('nl_query'); t.value = '{text}'; t.focus(); console.log('Filled with: {text}'); setTimeout(() => htmx.trigger(t.form, 'submit'), 100);",
+        onclick=f"const t = document.getElementById('nl_query'); t.value = '{text}'; t.focus(); console.log('Filled with: {text}'); htmx.trigger(t.form, 'submit');",
     )
 
 
@@ -739,6 +775,46 @@ def render_all_evals(sql_query: str) -> Any:
 
 
 @rt
+async def llm_summary(nl_query: str = "", sql_query: str = "", csv_text: str = ""):
+    """Asynchronously generate and return the model's summary panel.
+
+    This route is called via HTMX after the main results render, so users see
+    the table and SQL immediately while the summary loads. Returns a panel
+    that replaces the placeholder with id 'llm_summary_panel'.
+    """
+    try:
+        text = await llm_observe_clickhouse_result(nl_query, sql_query, csv_text)
+        if text:
+            content = Div(
+                H3("Model's Summary of Results"),
+                Div(text, cls="marked"),
+                cls="panel",
+                id="llm_summary_panel",
+            )
+            # Re-process markdown for the newly swapped content only
+            return (
+                content,
+                Script(
+                    "proc_htmx('#llm_summary_panel .marked', e => e.innerHTML = marked.parse(e.textContent))"
+                ),
+            )
+        else:
+            return Div(
+                H3("Model's Summary of Results"),
+                P("No summary available.", cls="muted"),
+                cls="panel",
+                id="llm_summary_panel",
+            )
+    except Exception as e:
+        return Div(
+            H3("Model's Summary of Results"),
+            P(f"Error generating summary: {e}", cls="muted"),
+            cls="panel",
+            id="llm_summary_panel",
+        )
+
+
+@rt
 async def run(nl_query: str = "", sess=None):
     try:
         if not nl_query.strip():
@@ -769,6 +845,9 @@ async def run(nl_query: str = "", sess=None):
             if evals_section is not None:
                 parts += [Divider(), evals_section]
             return result_card(*parts)
+
+        # ---------- Evals on the generated SQL (compute immediately) ----------
+        evals_section = render_all_evals(sql_query)
 
         # Execute with ClickHouse
         if not key_id or not key_secret:
@@ -809,10 +888,8 @@ async def run(nl_query: str = "", sess=None):
         else:
             df = pd.DataFrame()
 
-        # Let the LLM "see" the ClickHouse response and produce a brief summary
-        llm_followup_text: Optional[str] = await llm_observe_clickhouse_result(
-            nl_query, sql_query, csv_text
-        )
+        # Prepare a trimmed CSV preview for the async summary call
+        csv_preview = _truncate_text(csv_text or "")
 
         # Build polished two-column UI
         sql_pre = Pre(Code(sql_query), id="sql_text", cls="sql-view")
@@ -828,30 +905,44 @@ async def run(nl_query: str = "", sess=None):
         )
 
         left_pane_children = []
-        if llm_followup_text:
-            left_pane_children.append(
-                Div(
-                    H3("Model's Summary of Results"),
-                    Div(llm_followup_text, cls="marked"),
-                    cls="panel",
-                )
-            )
-        # Generated SQL panel (no copy buttons)
+        # Generated SQL panel (no copy buttons) — above summary
         left_pane_children.append(
             Div(H3("Generated SQL"), sql_pre, cls="panel sql-wrap")
+        )
+        # Summary placeholder panel; loads asynchronously after initial render
+        left_pane_children.append(
+            Div(
+                H3("Model's Summary of Results"),
+                Div(
+                    Div(
+                        UkIcon("loader", height=16, cls="animate-spin mr-2"),
+                        Span("Generating summary", cls="dots"),
+                        cls="flex items-center",
+                    ),
+                    cls="muted",
+                ),
+                id="llm_summary_panel",
+                cls="panel",
+                hx_post=llm_summary.to(),
+                hx_trigger="load",
+                hx_target="this",
+                hx_swap="outerHTML",
+                hx_vals=json.dumps(
+                    {
+                        "nl_query": nl_query,
+                        "sql_query": sql_query,
+                        "csv_text": csv_preview,
+                    }
+                ),
+            )
         )
 
         grid = Div(
             Div(*left_pane_children, cls="left-stack"), results_pane, cls="results-grid"
         )
-        # ---------- Evals on the generated SQL ----------
-        evals_section = render_all_evals(sql_query)
 
         return result_card(
-            Div(H3("Results"), Div(grid, evals_section), cls="results-section"),
-            Script(
-                "setTimeout(() => proc_htmx('.marked', e => e.innerHTML = marked.parse(e.textContent)), 100);"
-            ),
+            Div(H3("Results"), Div(grid, evals_section), cls="results-section")
         )
 
     except Exception as e:
