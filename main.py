@@ -252,7 +252,7 @@ async def llm_observe_clickhouse_result(
             model="gpt-5-mini",
             input=followup_input,
             text={"format": {"type": "text"}},
-            reasoning={"effort": "low"},
+            reasoning={"effort": "minimal"},
             parallel_tool_calls=False,
         )
         # Prefer output_text if present; otherwise scan items
@@ -272,11 +272,12 @@ async def llm_observe_clickhouse_result(
 
 
 # ----- FastHTML app -----
-_theme_hdrs = Theme.blue.headers(highlightjs=True)
+# Force dark mode for MonsterUI theme (disable light theme)
+_theme_hdrs = Theme.blue.headers(mode="dark", highlightjs=True)
 # App-specific minimal CSS to polish layout
 _app_css = Style(
     """
-    :root { --surface: #0c0f13; --surface-2:#0f141a; --border:#222933; --shadow: 0 10px 24px rgba(0,0,0,.35); }
+    :root { color-scheme: dark; --surface: #0c0f13; --surface-2:#0f141a; --border:#222933; --shadow: 0 10px 24px rgba(0,0,0,.35); }
     /* Force the Titled() H1 to align with our container */
     body h1, h1, .container h1, main h1 {
         width: 100% !important;
